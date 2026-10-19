@@ -117,6 +117,7 @@ async def merge_retrieved_info(
                     examples=column_info.examples,
                     description=column_info.description,
                     alias=column_info.alias,
+                    reference=column_info.reference,
                 )
                 for column_info in column_infos
             ]
@@ -136,6 +137,7 @@ async def merge_retrieved_info(
                 description=retrieved_metric_info.description,
                 relevant_columns=retrieved_metric_info.relevant_columns,
                 alias=retrieved_metric_info.alias,
+                formula=retrieved_metric_info.formula,
             )
             for retrieved_metric_info in retrieved_metric_infos
         ]

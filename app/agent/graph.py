@@ -13,8 +13,10 @@ from langgraph.constants import END, START
 from langgraph.graph import StateGraph
 
 from app.agent.context import DataAgentContext
+from app.agent.llm import llm
 from app.agent.nodes.add_extra_context import add_extra_context
 from app.agent.nodes.correct_sql import correct_sql
+from app.agent.nodes.explain_result import explain_result
 from app.agent.nodes.extract_keywords import extract_keywords
 from app.agent.nodes.filter_metric import filter_metric
 from app.agent.nodes.filter_table import filter_table
@@ -23,16 +25,21 @@ from app.agent.nodes.merge_retrieved_info import merge_retrieved_info
 from app.agent.nodes.recall_column import recall_column
 from app.agent.nodes.recall_metric import recall_metric
 from app.agent.nodes.recall_value import recall_value
+from app.agent.nodes.rewrite_query import rewrite_query
 from app.agent.nodes.run_sql import run_sql
 from app.agent.nodes.validate_sql import validate_sql
+from app.agent.reranker import LLMReranker
 from app.agent.state import DataAgentState
 from app.clients.embedding_client_manager import embedding_client_manager
 from app.clients.es_client_manager import es_client_manager
 from app.clients.mysql_client_manager import (
     dw_mysql_client_manager,
+    dw_mysql_readonly_client_manager,
     meta_mysql_client_manager,
 )
 from app.clients.qdrant_client_manager import qdrant_client_manager
+from app.repositories.es.column_es_repository import ColumnESRepository
+from app.repositories.es.metric_es_repository import MetricESRepository
 from app.repositories.es.value_es_repository import ValueESRepository
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
@@ -43,6 +50,7 @@ from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantReposit
 graph_builder = StateGraph(state_schema=DataAgentState, context_schema=DataAgentContext)
 
 # 注册节点：每个节点负责问数链路中的一个清晰步骤
+graph_builder.add_node("rewrite_query", rewrite_query)
 graph_builder.add_node("extract_keywords", extract_keywords)
 graph_builder.add_node("recall_column", recall_column)
 graph_builder.add_node("recall_value", recall_value)
@@ -55,9 +63,11 @@ graph_builder.add_node("generate_sql", generate_sql)
 graph_builder.add_node("validate_sql", validate_sql)
 graph_builder.add_node("correct_sql", correct_sql)
 graph_builder.add_node("run_sql", run_sql)
+graph_builder.add_node("explain_result", explain_result)
 
-# 从用户问题开始，先抽取关键词作为后续检索的基础
-graph_builder.add_edge(START, "extract_keywords")
+# 从用户问题开始，先做多轮追问改写（单轮无历史时透传），再抽取关键词作为检索基础
+graph_builder.add_edge(START, "rewrite_query")
+graph_builder.add_edge("rewrite_query", "extract_keywords")
 
 # 关键词抽取后并行进入三类召回，分别面向字段 字段值和业务指标
 graph_builder.add_edge("extract_keywords", "recall_column")
@@ -79,14 +89,28 @@ graph_builder.add_edge("filter_metric", "add_extra_context")
 graph_builder.add_edge("add_extra_context", "generate_sql")
 graph_builder.add_edge("generate_sql", "validate_sql")
 
-# SQL 校验通过就直接执行，校验失败则先进入修正节点
+# 修正次数上限：模型可能反复生成非法 SQL，设上限避免校验-修正回环死循环
+MAX_SQL_CORRECT_COUNT = 3
+
+
+def _route_after_validate(state: DataAgentState) -> str:
+    """校验通过直接执行；失败且还有修正额度则回环修正，额度用尽则直接执行兜底"""
+    if state["error"] is None:
+        return "run_sql"
+    if state.get("correct_count", 0) >= MAX_SQL_CORRECT_COUNT:
+        return "run_sql"
+    return "correct_sql"
+
+
+# SQL 校验通过就直接执行，校验失败则先进入修正节点，修正后再回到校验节点重新校验
 graph_builder.add_conditional_edges(
     source="validate_sql",
-    path=lambda state: "run_sql" if state["error"] is None else "correct_sql",
+    path=_route_after_validate,
     path_map={"run_sql": "run_sql", "correct_sql": "correct_sql"},
 )
-graph_builder.add_edge("correct_sql", "run_sql")
-graph_builder.add_edge("run_sql", END)
+graph_builder.add_edge("correct_sql", "validate_sql")
+graph_builder.add_edge("run_sql", "explain_result")
+graph_builder.add_edge("explain_result", END)
 
 # 编译后的 graph 是对外使用的 Agent 执行入口
 graph = graph_builder.compile()
@@ -104,14 +128,17 @@ if __name__ == "__main__":
         es_client_manager.init()
         meta_mysql_client_manager.init()
         dw_mysql_client_manager.init()
+        dw_mysql_readonly_client_manager.init()
 
         # Meta MySQL 用来补齐元数据，DW MySQL 用来读取数据库方言和版本
+        # 只读会话用来执行 LLM 生成的不可信 SQL
         async with (
             meta_mysql_client_manager.session_factory() as meta_session,
             dw_mysql_client_manager.session_factory() as dw_session,
+            dw_mysql_readonly_client_manager.session_factory() as dw_readonly_session,
         ):
             meta_mysql_repository = MetaMySQLRepository(meta_session)
-            dw_mysql_repository = DWMySQLRepository(dw_session)
+            dw_mysql_repository = DWMySQLRepository(dw_session, dw_readonly_session)
 
             # 字段和指标分别使用不同 Qdrant collection，取值检索使用 ES index
             column_qdrant_repository = ColumnQdrantRepository(
@@ -121,14 +148,21 @@ if __name__ == "__main__":
                 qdrant_client_manager.client
             )
             value_es_repository = ValueESRepository(es_client_manager.client)
+            # 字段和指标元数据各建一个 ES 全文索引，作为召回里的稀疏通道
+            column_es_repository = ColumnESRepository(es_client_manager.client)
+            metric_es_repository = MetricESRepository(es_client_manager.client)
+            reranker = LLMReranker(llm)
 
             # 当前只需要传入原始问题，后续节点会逐步写回召回、过滤和额外上下文结果
             state = DataAgentState(query="统计华北地区的销售总额")
             context = DataAgentContext(
                 column_qdrant_repository=column_qdrant_repository,
+                column_es_repository=column_es_repository,
                 embedding_client=embedding_client_manager.client,
                 metric_qdrant_repository=metric_qdrant_repository,
+                metric_es_repository=metric_es_repository,
                 value_es_repository=value_es_repository,
+                reranker=reranker,
                 meta_mysql_repository=meta_mysql_repository,
                 dw_mysql_repository=dw_mysql_repository,
             )
@@ -144,5 +178,6 @@ if __name__ == "__main__":
         await es_client_manager.close()
         await meta_mysql_client_manager.close()
         await dw_mysql_client_manager.close()
+        await dw_mysql_readonly_client_manager.close()
 
     asyncio.run(test())

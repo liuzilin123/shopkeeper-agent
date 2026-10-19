@@ -26,6 +26,7 @@ class ColumnInfoMapper:
             description=column_info_mysql.description,
             alias=column_info_mysql.alias,
             table_id=column_info_mysql.table_id,
+            reference=column_info_mysql.reference,
         )
 
     @staticmethod

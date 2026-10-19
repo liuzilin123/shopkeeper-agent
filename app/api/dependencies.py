@@ -12,13 +12,18 @@ from fastapi import Depends
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.llm import llm
+from app.agent.reranker import LLMReranker
 from app.clients.embedding_client_manager import embedding_client_manager
 from app.clients.es_client_manager import es_client_manager
 from app.clients.mysql_client_manager import (
     dw_mysql_client_manager,
+    dw_mysql_readonly_client_manager,
     meta_mysql_client_manager,
 )
 from app.clients.qdrant_client_manager import qdrant_client_manager
+from app.repositories.es.column_es_repository import ColumnESRepository
+from app.repositories.es.metric_es_repository import MetricESRepository
 from app.repositories.es.value_es_repository import ValueESRepository
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
@@ -56,12 +61,20 @@ async def get_dw_session():
         yield dw_session
 
 
+async def get_dw_readonly_session():
+    """创建一次请求内使用的数仓只读 Session，仅用于执行不可信的生成 SQL"""
+
+    async with dw_mysql_readonly_client_manager.session_factory() as dw_readonly_session:
+        yield dw_readonly_session
+
+
 async def get_dw_mysql_repository(
     session: Annotated[AsyncSession, Depends(get_dw_session)],
+    readonly_session: Annotated[AsyncSession, Depends(get_dw_readonly_session)],
 ) -> DWMySQLRepository:
-    """基于请求级 Session 创建数仓仓储"""
+    """基于请求级 Session 创建数仓仓储，并注入执行 SQL 用的只读会话"""
 
-    return DWMySQLRepository(session)
+    return DWMySQLRepository(session, readonly_session)
 
 
 async def get_column_qdrant_repository() -> ColumnQdrantRepository:
@@ -82,6 +95,24 @@ async def get_value_es_repository() -> ValueESRepository:
     return ValueESRepository(es_client_manager.client)
 
 
+async def get_column_es_repository() -> ColumnESRepository:
+    """创建字段元数据全文检索仓储，作为字段召回里的稀疏通道"""
+
+    return ColumnESRepository(es_client_manager.client)
+
+
+async def get_metric_es_repository() -> MetricESRepository:
+    """创建指标元数据全文检索仓储，作为指标召回里的稀疏通道"""
+
+    return MetricESRepository(es_client_manager.client)
+
+
+async def get_reranker() -> LLMReranker:
+    """创建 LLM 列表式重排器"""
+
+    return LLMReranker(llm)
+
+
 async def get_query_service(
     meta_mysql_repository: Annotated[
         MetaMySQLRepository, Depends(get_meta_mysql_repository)
@@ -97,6 +128,13 @@ async def get_query_service(
         MetricQdrantRepository, Depends(get_metric_qdrant_repository)
     ],
     value_es_repository: Annotated[ValueESRepository, Depends(get_value_es_repository)],
+    column_es_repository: Annotated[
+        ColumnESRepository, Depends(get_column_es_repository)
+    ],
+    metric_es_repository: Annotated[
+        MetricESRepository, Depends(get_metric_es_repository)
+    ],
+    reranker: Annotated[LLMReranker, Depends(get_reranker)],
 ) -> QueryService:
     """组装一次查询所需的业务服务"""
 
@@ -108,4 +146,7 @@ async def get_query_service(
         column_qdrant_repository=column_qdrant_repository,
         metric_qdrant_repository=metric_qdrant_repository,
         value_es_repository=value_es_repository,
+        column_es_repository=column_es_repository,
+        metric_es_repository=metric_es_repository,
+        reranker=reranker,
     )

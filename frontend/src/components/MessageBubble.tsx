@@ -3,7 +3,10 @@
  * 组合展示用户问题、智能体回复、执行流程和结果表格
  */
 import { Bot, Copy, UserRound } from "lucide-react";
+import { Chart } from "./Chart";
+import { ExportButton } from "./ExportButton";
 import { ResultTable } from "./ResultTable";
+import { SqlBlock } from "./SqlBlock";
 import { StepRail } from "./StepRail";
 import { cn, formatTime, toClipboardText } from "../lib/format";
 import type { ChatMessage } from "../types/agent";
@@ -55,7 +58,12 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           )}
 
           {!isUser && <StepRail steps={message.steps} />}
+          {!isUser && message.result !== undefined && (
+            <Chart data={message.result} spec={message.chart} />
+          )}
           {!isUser && message.result !== undefined && <ResultTable data={message.result} />}
+          {!isUser && message.sql && <SqlBlock sql={message.sql} />}
+          {!isUser && message.result !== undefined && <ExportButton data={message.result} />}
 
           <div
             className={cn(

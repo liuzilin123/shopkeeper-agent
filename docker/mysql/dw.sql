@@ -2,6 +2,11 @@ SET NAMES utf8mb4;
 
 CREATE DATABASE IF NOT EXISTS dw DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 GRANT ALL PRIVILEGES ON dw.* TO 'didilili'@'%';
+
+-- 只读账户：只授予 SELECT，专门用来执行 LLM 生成的不可信 SQL，杜绝误写数仓
+CREATE USER IF NOT EXISTS 'dw_reader'@'%' IDENTIFIED BY 'dili123';
+GRANT SELECT ON dw.* TO 'dw_reader'@'%';
+
 USE dw;
 
 

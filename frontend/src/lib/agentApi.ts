@@ -2,12 +2,13 @@
  * 智能体接口客户端
  * 封装后端 /api/query SSE 流式接口请求与事件解析逻辑
  */
-import type { AgentEvent } from "../types/agent";
+import type { AgentEvent, HistoryTurn } from "../types/agent";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 
 type QueryOptions = {
   signal?: AbortSignal;
+  history?: HistoryTurn[];
   onEvent: (event: AgentEvent) => void;
 };
 
@@ -18,7 +19,7 @@ export async function streamQuery(query: string, options: QueryOptions) {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, history: options.history ?? [] }),
     signal: options.signal,
   });
 

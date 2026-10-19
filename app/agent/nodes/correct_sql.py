@@ -28,6 +28,7 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
         # 校正 SQL 仍然需要完整上下文，避免模型只根据报错修语法却改丢业务语义
         table_infos = state["table_infos"]
         metric_infos = state["metric_infos"]
+        join_infos = state["join_infos"]
         date_info = state["date_info"]
         db_info = state["db_info"]
         query = state["query"]
@@ -41,6 +42,7 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
             input_variables=[
                 "table_infos",
                 "metric_infos",
+                "join_infos",
                 "date_info",
                 "db_info",
                 "query",
@@ -61,6 +63,9 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
                 "metric_infos": yaml.dump(
                     metric_infos, allow_unicode=True, sort_keys=False
                 ),
+                "join_infos": yaml.dump(
+                    join_infos, allow_unicode=True, sort_keys=False
+                ),
                 "date_info": yaml.dump(date_info, allow_unicode=True, sort_keys=False),
                 "db_info": yaml.dump(db_info, allow_unicode=True, sort_keys=False),
                 "query": query,
@@ -71,7 +76,8 @@ async def correct_sql(state: DataAgentState, runtime: Runtime[DataAgentContext])
 
         logger.info(f"校正后的SQL：{result}")
         writer({"type": "progress", "step": step, "status": "success"})
-        return {"sql": result}
+        # 覆盖 SQL 并累加修正次数，供 graph.py 判断是否继续回环校验
+        return {"sql": result, "correct_count": state.get("correct_count", 0) + 1}
     except Exception as e:
         logger.error(f"{step} failed: {e}")
         writer({"type": "progress", "step": step, "status": "error"})

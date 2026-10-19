@@ -22,11 +22,21 @@ from app.entities.column_metric import ColumnMetric
 from app.entities.metric_info import MetricInfo
 from app.entities.table_info import TableInfo
 from app.entities.value_info import ValueInfo
+from app.repositories.es.column_es_repository import ColumnESRepository
+from app.repositories.es.metric_es_repository import MetricESRepository
 from app.repositories.es.value_es_repository import ValueESRepository
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
 from app.repositories.qdrant.column_qdrant_repository import ColumnQdrantRepository
 from app.repositories.qdrant.metric_qdrant_repository import MetricQdrantRepository
+
+# 向量点 id 的固定命名空间：配合 uuid5 让“同一语义入口”永远映射到同一个点 id
+_POINT_ID_NAMESPACE = uuid.UUID("a3f1c4b2-7d5e-4a6f-9c8b-1e2f3a4b5c6d")
+
+
+def _stable_point_id(scope: str, kind: str, text: str) -> uuid.UUID:
+    """为某个实体的某个语义入口生成稳定向量点 id，重复构建时复用同一 id"""
+    return uuid.uuid5(_POINT_ID_NAMESPACE, f"{scope}:{kind}:{text}")
 
 
 class MetaKnowledgeService:
@@ -40,6 +50,8 @@ class MetaKnowledgeService:
         embedding_client: HuggingFaceEndpointEmbeddings,
         value_es_repository: ValueESRepository,
         metric_qdrant_repository: MetricQdrantRepository,
+        column_es_repository: ColumnESRepository,
+        metric_es_repository: MetricESRepository,
     ):
         # meta repository 负责结构化元数据的落库
         self.meta_mysql_repository: MetaMySQLRepository = meta_mysql_repository
@@ -53,6 +65,10 @@ class MetaKnowledgeService:
         self.value_es_repository: ValueESRepository = value_es_repository
         # 指标向量集合和字段向量集合分开管理，便于后续按对象类型独立召回
         self.metric_qdrant_repository: MetricQdrantRepository = metric_qdrant_repository
+        # 字段元数据全文索引，作为字段召回里的稀疏通道
+        self.column_es_repository: ColumnESRepository = column_es_repository
+        # 指标元数据全文索引，作为指标召回里的稀疏通道
+        self.metric_es_repository: MetricESRepository = metric_es_repository
 
     async def _save_tables_to_meta_db(
         self, meta_config: MetaConfig
@@ -89,12 +105,13 @@ class MetaKnowledgeService:
                     description=column.description,
                     alias=column.alias,
                     table_id=table.name,
+                    reference=column.reference,
                 )
                 column_infos.append(column_info)
 
         async with self.meta_mysql_repository.session.begin():
-            self.meta_mysql_repository.save_table_infos(table_infos)
-            self.meta_mysql_repository.save_column_infos(column_infos)
+            await self.meta_mysql_repository.save_table_infos(table_infos)
+            await self.meta_mysql_repository.save_column_infos(column_infos)
 
         return column_infos
 
@@ -105,9 +122,10 @@ class MetaKnowledgeService:
         points: list[dict] = []
         for column_info in column_infos:
             # 一个字段不会只生成一个向量点，而是把名字 描述 别名都拆开建立语义入口
+            # 点 id 用 uuid5 稳定生成，重复构建时会覆盖同一点而不是新增重复向量
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": _stable_point_id(column_info.id, "name", column_info.name),
                     "embedding_text": column_info.name,
                     "payload": asdict(column_info),
                 }
@@ -115,7 +133,9 @@ class MetaKnowledgeService:
 
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": _stable_point_id(
+                        column_info.id, "description", column_info.description
+                    ),
                     "embedding_text": column_info.description,
                     "payload": asdict(column_info),
                 }
@@ -124,7 +144,7 @@ class MetaKnowledgeService:
             for alia in column_info.alias:
                 points.append(
                     {
-                        "id": uuid.uuid4(),
+                        "id": _stable_point_id(column_info.id, "alias", alia),
                         "embedding_text": alia,
                         "payload": asdict(column_info),
                     }
@@ -181,6 +201,11 @@ class MetaKnowledgeService:
 
         await self.value_es_repository.index(value_infos)
 
+    async def _save_column_info_to_es(self, column_infos: list[ColumnInfo]):
+        """把字段元数据写入 ES 全文索引，作为字段召回的稀疏检索通道"""
+        await self.column_es_repository.ensure_index()
+        await self.column_es_repository.index(column_infos)
+
     async def _save_metrics_to_meta_db(
         self, meta_config: MetaConfig
     ) -> list[MetricInfo]:
@@ -196,6 +221,7 @@ class MetaKnowledgeService:
                 description=metric.description,
                 relevant_columns=metric.relevant_columns,
                 alias=metric.alias,
+                formula=metric.formula,
             )
             metric_infos.append(metric_info)
             for column in metric.relevant_columns:
@@ -205,8 +231,8 @@ class MetaKnowledgeService:
 
         # 指标本身和字段关系要放在同一笔事务里，避免只写入其中一部分
         async with self.meta_mysql_repository.session.begin():
-            self.meta_mysql_repository.save_metric_infos(metric_infos)
-            self.meta_mysql_repository.save_column_metrics(column_metrics)
+            await self.meta_mysql_repository.save_metric_infos(metric_infos)
+            await self.meta_mysql_repository.save_column_metrics(column_metrics)
 
         return metric_infos
 
@@ -217,9 +243,10 @@ class MetaKnowledgeService:
         points: list[dict] = []
         for metric_info in metric_infos:
             # 和字段一样，一个指标也会拆成名字 描述 别名这几类语义入口
+            # 点 id 同样用 uuid5 稳定生成，保证重复构建幂等
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": _stable_point_id(metric_info.id, "name", metric_info.name),
                     "embedding_text": metric_info.name,
                     "payload": asdict(metric_info),
                 }
@@ -227,7 +254,9 @@ class MetaKnowledgeService:
 
             points.append(
                 {
-                    "id": uuid.uuid4(),
+                    "id": _stable_point_id(
+                        metric_info.id, "description", metric_info.description
+                    ),
                     "embedding_text": metric_info.description,
                     "payload": asdict(metric_info),
                 }
@@ -236,7 +265,7 @@ class MetaKnowledgeService:
             for alia in metric_info.alias:
                 points.append(
                     {
-                        "id": uuid.uuid4(),
+                        "id": _stable_point_id(metric_info.id, "alias", alia),
                         "embedding_text": alia,
                         "payload": asdict(metric_info),
                     }
@@ -259,6 +288,11 @@ class MetaKnowledgeService:
 
         await self.metric_qdrant_repository.upsert(ids, embeddings, payloads)
 
+    async def _save_metrics_to_es(self, metric_infos: list[MetricInfo]):
+        """把指标元数据写入 ES 全文索引，作为指标召回的稀疏检索通道"""
+        await self.metric_es_repository.ensure_index()
+        await self.metric_es_repository.index(metric_infos)
+
     async def build(self, config_path: Path):
         """读取配置并依次构建 Meta MySQL Qdrant 和 ES 中的元数据索引"""
         context = OmegaConf.load(config_path)
@@ -276,6 +310,9 @@ class MetaKnowledgeService:
             # 对指定的维度字段取值建立全文索引
             await self._save_value_info_to_es(meta_config, column_infos)
             logger.info("为字段取值建立全文索引")
+            # 对字段元数据建立全文索引，作为字段召回的稀疏通道
+            await self._save_column_info_to_es(column_infos)
+            logger.info("为字段信息建立全文索引")
 
         # 根据配置文件同步指定的指标信息
         if meta_config.metrics:
@@ -286,3 +323,7 @@ class MetaKnowledgeService:
             # 对指标信息建立向量索引
             await self._save_metrics_to_qdrant(metric_infos)
             logger.info("为指标信息建立向量索引成功")
+
+            # 对指标元数据建立全文索引，作为指标召回的稀疏通道
+            await self._save_metrics_to_es(metric_infos)
+            logger.info("为指标信息建立全文索引成功")

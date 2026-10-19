@@ -9,6 +9,7 @@ Repository 自身只关心“如何写入”，而“哪些写操作要放在同
 """
 
 from sqlalchemy import text
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.entities.column_info import ColumnInfo
@@ -29,27 +30,65 @@ class MetaMySQLRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    def save_table_infos(self, table_infos: list[TableInfo]):
-        """批量保存表元数据。输入仍然是业务实体，而不是 ORM 模型"""
-        self.session.add_all(
+    def _to_values(self, model) -> dict:
+        """把 ORM 模型转成列名到值的字典，供 MySQL upsert 批量插入使用"""
+        return {
+            col.name: getattr(model, col.name)
+            for col in type(model).__table__.columns
+        }
+
+    async def _upsert(self, models: list) -> None:
+        """按主键幂等写入：已存在则用新值覆盖，不存在则插入，避免重复构建冲突"""
+        if not models:
+            return
+
+        model_cls = type(models[0])
+        stmt = mysql_insert(model_cls).values(
+            [self._to_values(model) for model in models]
+        )
+
+        # 主键之外的列在发生冲突时用本次的新值覆盖，主键保持不变
+        primary_key_names = {
+            col.name for col in model_cls.__table__.primary_key.columns
+        }
+        update_assignments = {
+            col.name: stmt.inserted[col.name]
+            for col in model_cls.__table__.columns
+            if col.name not in primary_key_names
+        }
+
+        if update_assignments:
+            stmt = stmt.on_duplicate_key_update(**update_assignments)
+        else:
+            # column_metric 只有联合主键，冲突时用主键自赋值充当无操作更新
+            noop_column = next(iter(primary_key_names))
+            stmt = stmt.on_duplicate_key_update(
+                **{noop_column: stmt.inserted[noop_column]}
+            )
+
+        await self.session.execute(stmt)
+
+    async def save_table_infos(self, table_infos: list[TableInfo]):
+        """按主键幂等保存表元数据。重复构建时覆盖旧值而不是触发主键冲突"""
+        await self._upsert(
             [TableInfoMapper.to_model(table_info) for table_info in table_infos]
         )
 
-    def save_column_infos(self, column_infos: list[ColumnInfo]):
-        """批量保存字段元数据。实体到模型的转换统一通过 Mapper 完成"""
-        self.session.add_all(
+    async def save_column_infos(self, column_infos: list[ColumnInfo]):
+        """按主键幂等保存字段元数据。实体到模型的转换统一通过 Mapper 完成"""
+        await self._upsert(
             [ColumnInfoMapper.to_model(column_info) for column_info in column_infos]
         )
 
-    def save_metric_infos(self, metric_infos: list[MetricInfo]):
-        """批量保存指标元数据。指标本身和字段关联关系分开写入"""
-        self.session.add_all(
+    async def save_metric_infos(self, metric_infos: list[MetricInfo]):
+        """按主键幂等保存指标元数据。指标本身和字段关联关系分开写入"""
+        await self._upsert(
             [MetricInfoMapper.to_model(metric_info) for metric_info in metric_infos]
         )
 
-    def save_column_metrics(self, column_metrics: list[ColumnMetric]):
-        """批量保存字段与指标的关联关系"""
-        self.session.add_all(
+    async def save_column_metrics(self, column_metrics: list[ColumnMetric]):
+        """按联合主键幂等保存字段与指标的关联关系"""
+        await self._upsert(
             [
                 ColumnMetricMapper.to_model(column_metric)
                 for column_metric in column_metrics

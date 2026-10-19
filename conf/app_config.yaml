@@ -10,35 +10,42 @@ logging:
     level: INFO
 
 db_meta:
-  host: localhost
+  host: 127.0.0.1
   port: 3306
   user: didilili
   password: dili123
   database: meta
 
 db_dw:
-  host: localhost
+  host: 127.0.0.1
   port: 3306
   user: didilili
   password: dili123
   database: dw
 
+db_dw_readonly:
+  host: 127.0.0.1
+  port: 3306
+  user: dw_reader
+  password: dili123
+  database: dw
+
 qdrant:
-  host: localhost
+  host: 127.0.0.1
   port: 6333
   embedding_size: 1024
 
 embedding:
-  host: localhost
+  host: 127.0.0.1
   port: 8081
   model: BAAI/bge-large-zh-v1.5
 
 es:
-  host: localhost
+  host: 127.0.0.1
   port: 9200
   index_name: data_agent
 
 llm:
-  model_name: Pro/zai-org/GLM-5.1
+  model_name: deepseek-v4-flash
   api_key: ${oc.env:LLM_API_KEY}
-  base_url: https://api.siliconflow.cn/v1
+  base_url: https://api.deepseek.com

@@ -22,6 +22,8 @@ class MetricInfoState(TypedDict):
     # 指标依赖的字段 id，用来提示模型不要脱离业务口径随意计算
     relevant_columns: list[str]
     alias: list[str]
+    # 指标可执行计算公式，存在时模型必须严格按该表达式聚合
+    formula: str
 
 
 class ColumnInfoState(TypedDict):
@@ -34,6 +36,8 @@ class ColumnInfoState(TypedDict):
     examples: list
     description: str
     alias: list[str]
+    # 外键引用的目标字段，用于派生多表 JOIN 关系
+    reference: str | None
 
 
 class TableInfoState(TypedDict):
@@ -43,6 +47,15 @@ class TableInfoState(TypedDict):
     role: str
     description: str
     columns: list[ColumnInfoState]
+
+
+class JoinInfoState(TypedDict):
+    """一条表关联边，用于告诉模型多表查询时使用哪组主外键关联"""
+
+    left_table: str
+    left_column: str
+    right_table: str
+    right_column: str
 
 
 class DateInfoState(TypedDict):
@@ -63,7 +76,8 @@ class DBInfoState(TypedDict):
 class DataAgentState(TypedDict):
     """一次问数链路中的核心状态"""
 
-    query: str  # 用户输入的查询
+    query: str  # 用户输入的查询（多轮追问时会被改写为自包含问题）
+    history: list[dict]  # 多轮对话历史，用于追问改写，单轮问数为空
     keywords: list[str]  # 抽取的关键词
     retrieved_column_infos: list[ColumnInfo]  # 检索到的字段信息
     retrieved_metric_infos: list[MetricInfo]  # 检索到的指标信息
@@ -73,7 +87,13 @@ class DataAgentState(TypedDict):
     metric_infos: list[MetricInfoState]  # 合并后的指标上下文
     date_info: DateInfoState  # 当前日期 星期和季度信息
     db_info: DBInfoState  # 数据库方言和版本信息
+    join_infos: list[JoinInfoState]  # 最终选中表之间的 JOIN 关联边
 
     sql: str  # 生成或校正后的SQL
+    result: list[dict]  # SQL 执行结果行，供下游消费或评测读取
+    explanation: str  # 对查询结果的自然语言解释
+    chart_spec: dict  # 图表推荐，形如 {"type","x_axis","y_axis","title"}
 
     error: str  # 校验SQL时出现的错误信息
+
+    correct_count: int  # SQL 已修正次数，用于限制校验-修正回环，避免无限循环

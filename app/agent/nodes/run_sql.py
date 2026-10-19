@@ -22,6 +22,8 @@ async def run_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]):
     try:
         # 这里拿到的可能是 generate_sql 直接通过校验的 SQL，也可能是 correct_sql 覆盖后的 SQL
         sql = state["sql"]
+        # 先把最终 SQL 透传给前端展示，即使后续执行失败，用户也能看到本次生成的 SQL
+        writer({"type": "sql", "data": sql})
         dw_mysql_repository = runtime.context["dw_mysql_repository"]
 
         # 真实数据库访问统一封装在仓储层，节点只负责从状态取 SQL 并触发执行
@@ -29,6 +31,8 @@ async def run_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]):
         logger.info(f"SQL执行结果：{result}")
         writer({"type": "progress", "step": step, "status": "success"})
         writer({"type": "result", "data": result})
+        # 把结果写回 state，方便下游消费或评测脚本直接读取最终结果
+        return {"result": result}
 
     except Exception as e:
         logger.error(f"{step} failed: {e}")

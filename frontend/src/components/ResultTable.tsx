@@ -3,22 +3,7 @@
  * 将后端返回的结构化数据归一化为可滚动表格
  */
 import { Database, FileJson } from "lucide-react";
-
-function normalizeRows(data: unknown): Array<Record<string, unknown>> {
-  if (Array.isArray(data)) {
-    return data.map((item, index) =>
-      item && typeof item === "object" && !Array.isArray(item)
-        ? (item as Record<string, unknown>)
-        : { 序号: index + 1, 值: item },
-    );
-  }
-
-  if (data && typeof data === "object") {
-    return [data as Record<string, unknown>];
-  }
-
-  return [{ 值: data ?? "" }];
-}
+import { columnKeys, normalizeRows } from "../lib/data";
 
 function formatCell(value: unknown) {
   if (value === null || value === undefined) return "-";
@@ -28,12 +13,7 @@ function formatCell(value: unknown) {
 
 export function ResultTable({ data }: { data: unknown }) {
   const rows = normalizeRows(data);
-  const columns = Array.from(
-    rows.reduce((keys, row) => {
-      Object.keys(row).forEach((key) => keys.add(key));
-      return keys;
-    }, new Set<string>()),
-  );
+  const columns = columnKeys(rows);
 
   if (columns.length === 0) {
     return null;

@@ -18,3 +18,6 @@ class MetricInfo:
     # 指标依赖的底层字段列表，例如 GMV 依赖 fact_order.order_amount
     relevant_columns: list[str]
     alias: list[str]
+    # 指标可执行计算公式，例如 SUM(fact_order.order_amount)
+    # 存在时模型必须严格按该表达式聚合，不得自行推断口径
+    formula: str = ""

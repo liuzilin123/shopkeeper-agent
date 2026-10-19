@@ -1,9 +1,9 @@
 """
 指标召回节点
 
-负责根据用户问题从指标向量知识库中召回候选指标
+负责根据用户问题从指标知识库中召回候选指标
 它帮助 Agent 把“销售额 转化率 客单价”等业务表达映射到已定义指标
-实现路径和字段召回类似：关键词扩展 -> Embedding -> Qdrant 相似度检索 -> MetricInfo 去重
+实现路径和字段召回类似：关键词扩展 -> 稠密向量(Qdrant) + 稀疏全文(ES) -> RRF 融合 -> Reranker 精排
 """
 
 from langchain_core.output_parsers import JsonOutputParser
@@ -12,6 +12,8 @@ from langgraph.runtime import Runtime
 
 from app.agent.context import DataAgentContext
 from app.agent.llm import llm
+from app.agent.reranker import render_metric_candidate
+from app.agent.retrieval.rrf import reciprocal_rank_fusion
 from app.agent.state import DataAgentState
 from app.core.log import logger
 from app.entities.metric_info import MetricInfo
@@ -29,9 +31,11 @@ async def recall_metric(state: DataAgentState, runtime: Runtime[DataAgentContext
         # query 用于让 LLM 生成指标层检索词，keywords 来自上游的通用关键词抽取
         query = state["query"]
         keywords = state["keywords"]
-        # 指标召回使用向量检索，需要 Embedding 客户端和指标 Qdrant 仓储配合
+        # 指标召回使用稠密向量 + 稀疏全文两路，需要 Embedding、Qdrant、ES 和 Reranker
         embedding_client = runtime.context["embedding_client"]
         metric_qdrant_repository = runtime.context["metric_qdrant_repository"]
+        metric_es_repository = runtime.context["metric_es_repository"]
+        reranker = runtime.context["reranker"]
 
         # 用 LLM 把用户问法扩展成“指标概念”列表，例如“销售总额”可扩展出“GMV”“成交额”
         prompt = PromptTemplate(
@@ -48,21 +52,39 @@ async def recall_metric(state: DataAgentState, runtime: Runtime[DataAgentContext
         # 通用关键词和指标扩展词都参与召回，提升同义指标的命中率
         keywords = set(keywords + result)
 
-        # 用指标 id 做唯一键，避免多个关键词命中同一个指标时重复写入 state
-        metric_info_map: dict[str, MetricInfo] = {}
+        # 稠密向量 + 稀疏全文两条通道分别召回，再用 RRF 融合成统一候选分
+        candidate_map: dict[str, MetricInfo] = {}
+        candidate_scores: dict[str, float] = {}
         for keyword in keywords:
-            # 指标库是向量集合，查询词必须先 Embedding 成 query vector
             embedding = await embedding_client.aembed_query(keyword)
-            current_metric_infos: list[
-                MetricInfo
-            ] = await metric_qdrant_repository.search(embedding)
-            for metric_info in current_metric_infos:
-                if metric_info.id not in metric_info_map:
-                    metric_info_map[metric_info.id] = metric_info
+            dense_results = await metric_qdrant_repository.search(embedding)
+            sparse_results = await metric_es_repository.search(keyword)
 
-        # 写回 state 的是业务实体列表，后续过滤节点不需要关心 Qdrant 原始 point 结构
-        retrieved_metric_infos: list[MetricInfo] = list(metric_info_map.values())
-        logger.info(f"检索到指标信息：{list(metric_info_map.keys())}")
+            for metric_info in dense_results + sparse_results:
+                candidate_map.setdefault(metric_info.id, metric_info)
+            fused = reciprocal_rank_fusion([dense_results, sparse_results])
+            for metric_id, score in fused.items():
+                if score > candidate_scores.get(metric_id, 0.0):
+                    candidate_scores[metric_id] = score
+
+        # 候选统一交给 Reranker 做精排，让最相关的指标排到最前面
+        candidates: list[MetricInfo] = list(candidate_map.values())
+        if candidates:
+            items = [
+                (metric_info.id, render_metric_candidate(metric_info))
+                for metric_info in candidates
+            ]
+            ranked_ids = await reranker.rerank(query, items)
+            id_to_metric = {metric_info.id: metric_info for metric_info in candidates}
+            retrieved_metric_infos = [
+                id_to_metric[metric_id]
+                for metric_id in ranked_ids
+                if metric_id in id_to_metric
+            ]
+        else:
+            retrieved_metric_infos = []
+
+        logger.info(f"检索到指标信息：{[m.id for m in retrieved_metric_infos]}")
         writer({"type": "progress", "step": step, "status": "success"})
         return {"retrieved_metric_infos": retrieved_metric_infos}
     except Exception as e:

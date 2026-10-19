@@ -17,7 +17,7 @@ import { EmptyState } from "./components/EmptyState";
 import { MessageBubble } from "./components/MessageBubble";
 import { streamQuery } from "./lib/agentApi";
 import { cn, summarizeResult } from "./lib/format";
-import type { AgentEvent, ChatMessage, StepState } from "./types/agent";
+import type { AgentEvent, ChatMessage, HistoryTurn, StepState } from "./types/agent";
 
 const examples = [
   "统计 2025 年第一季度各大区的 GMV，并按 GMV 从高到低排序",
@@ -40,6 +40,23 @@ function upsertStep(steps: StepState[] = [], event: Extract<AgentEvent, { type: 
     updatedAt: Date.now(),
   });
   return next;
+}
+
+function buildHistory(messages: ChatMessage[]): HistoryTurn[] {
+  const turns: HistoryTurn[] = [];
+  for (const message of messages) {
+    if (message.role === "user") {
+      turns.push({ role: "user", content: message.content });
+    } else if (message.role === "assistant" && message.status === "done") {
+      const parts: string[] = [];
+      if (message.explanation) parts.push(message.explanation);
+      else if (message.result !== undefined) parts.push(summarizeResult(message.result));
+      if (message.sql) parts.push(`SQL：${message.sql}`);
+      if (parts.length > 0) turns.push({ role: "assistant", content: parts.join("\n") });
+    }
+  }
+  // 只保留最近几轮，控制历史上下文长度
+  return turns.slice(-6);
 }
 
 export default function App() {
@@ -66,6 +83,9 @@ export default function App() {
   const startQuery = async (rawQuery = draft) => {
     const query = rawQuery.trim();
     if (!query || isStreaming) return;
+
+    // 发送前从当前会话里取历史，供后端把追问改写成自包含问题
+    const history = buildHistory(messages);
 
     const userMessage: ChatMessage = {
       id: makeId(),
@@ -102,6 +122,22 @@ export default function App() {
             };
           }
 
+          if (event.type === "sql") {
+            return { ...message, sql: event.data };
+          }
+
+          if (event.type === "explanation") {
+            return {
+              ...message,
+              explanation: event.data,
+              content: event.data || message.content,
+            };
+          }
+
+          if (event.type === "chart") {
+            return { ...message, chart: event.data };
+          }
+
           if (event.type === "result") {
             return {
               ...message,
@@ -122,7 +158,7 @@ export default function App() {
     };
 
     try {
-      await streamQuery(query, { signal: controller.signal, onEvent });
+      await streamQuery(query, { signal: controller.signal, history, onEvent });
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId && message.status === "streaming"

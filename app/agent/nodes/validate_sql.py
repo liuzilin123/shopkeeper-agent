@@ -8,6 +8,7 @@ SQL 校验节点
 from langgraph.runtime import Runtime
 
 from app.agent.context import DataAgentContext
+from app.agent.sql_guard import SqlGuardError, validate_sql_security
 from app.agent.state import DataAgentState
 from app.core.log import logger
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
@@ -27,8 +28,18 @@ async def validate_sql(state: DataAgentState, runtime: Runtime[DataAgentContext]
         # SQL 可用性必须交给真实数仓判断，这里从运行时上下文取 DW Repository
         dw_mysql_repository: DWMySQLRepository = runtime.context["dw_mysql_repository"]
 
+        # 第一步：AST 静态校验，本地拦截写操作、多语句、危险函数和越权访问
+        # 白名单取本次查询被授予看到的表，越界访问（如 information_schema）直接拒绝
+        allowed_tables = {table_info["name"] for table_info in state["table_infos"]}
         try:
-            # validate 内部使用 explain <sql>，只关心数据库能否成功解析这条 SQL
+            validate_sql_security(sql, allowed_tables)
+        except SqlGuardError as e:
+            logger.info(f"SQL安全校验失败：{e}")
+            writer({"type": "progress", "step": step, "status": "success"})
+            return {"error": f"SQL 安全校验失败：{e}"}
+
+        # 第二步：用数据库 EXPLAIN 做真实解析校验，发现表名 字段名等语法错误
+        try:
             await dw_mysql_repository.validate(sql)
             writer({"type": "progress", "step": step, "status": "success"})
             logger.info("SQL语法正确")

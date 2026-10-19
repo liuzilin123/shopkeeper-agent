@@ -17,6 +17,8 @@ from app.clients.mysql_client_manager import (
     meta_mysql_client_manager,
 )
 from app.clients.qdrant_client_manager import qdrant_client_manager
+from app.repositories.es.column_es_repository import ColumnESRepository
+from app.repositories.es.metric_es_repository import MetricESRepository
 from app.repositories.es.value_es_repository import ValueESRepository
 from app.repositories.mysql.dw.dw_mysql_repository import DWMySQLRepository
 from app.repositories.mysql.meta.meta_mysql_repository import MetaMySQLRepository
@@ -51,6 +53,9 @@ async def build(config_path: Path):
         embedding_client = embedding_client_manager.client
         value_es_repository = ValueESRepository(es_client_manager.client)
         metric_qdrant_repository = MetricQdrantRepository(qdrant_client_manager.client)
+        # 字段和指标元数据也各建一个 ES 全文索引，作为召回里的稀疏通道
+        column_es_repository = ColumnESRepository(es_client_manager.client)
+        metric_es_repository = MetricESRepository(es_client_manager.client)
 
         # 创建 service 对象，并把 repository 注入进去
         meta_knowledge_service = MetaKnowledgeService(
@@ -60,6 +65,8 @@ async def build(config_path: Path):
             embedding_client=embedding_client,
             value_es_repository=value_es_repository,
             metric_qdrant_repository=metric_qdrant_repository,
+            column_es_repository=column_es_repository,
+            metric_es_repository=metric_es_repository,
         )
 
         # 真正进入服务层的构建逻辑

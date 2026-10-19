@@ -22,6 +22,7 @@ class ColumnConfig:
     description: str
     alias: list[str]
     sync: bool
+    reference: Optional[str] = None
 
 
 @dataclass
@@ -48,6 +49,7 @@ class MetricConfig:
     description: str
     relevant_columns: list[str]
     alias: list[str]
+    formula: str = ""
 
 
 @dataclass

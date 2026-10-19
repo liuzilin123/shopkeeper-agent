@@ -14,8 +14,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class DWMySQLRepository:
     """负责查询数仓真实表结构和字段样例值"""
 
-    def __init__(self, session: AsyncSession):
+    def __init__(
+        self, session: AsyncSession, readonly_session: AsyncSession | None = None
+    ):
+        # 常规会话用于构建期读取表结构/字段类型等受信内部查询
         self.session = session
+        # 只读会话用于执行 LLM 生成、不可信的 SQL，数据库层拒绝一切写操作
+        self.readonly_session = readonly_session
+
+    def _readonly_session(self) -> AsyncSession:
+        """取只读会话；未配置时直接报错，避免退回到高权限会话执行不可信 SQL"""
+        if self.readonly_session is None:
+            raise RuntimeError("DW 只读会话未配置，无法执行不可信 SQL")
+        return self.readonly_session
 
     async def get_column_types(self, table_name: str) -> dict[str, str]:
         """查询整张表的字段类型，作为 ColumnInfo.type 的真实来源"""
@@ -46,9 +57,9 @@ class DWMySQLRepository:
     async def validate(self, sql: str):
         """用 EXPLAIN 让数据库提前解析 SQL，发现语法 表名 字段名等错误"""
         sql = f"explain {sql}"
-        await self.session.execute(text(sql))
+        await self._readonly_session().execute(text(sql))
 
     async def run(self, sql: str) -> list[dict]:
         """执行最终 SQL，并把 SQLAlchemy 行对象转换成前端更易消费的字典列表"""
-        result = await self.session.execute(text(sql))
+        result = await self._readonly_session().execute(text(sql))
         return [dict(row) for row in result.mappings().fetchall()]

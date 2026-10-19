@@ -21,3 +21,5 @@ class ColumnInfo:
     description: str
     alias: list[str]
     table_id: str
+    # 外键引用的目标字段，形如 dim_region.region_id；非外键字段为 None
+    reference: str | None = None

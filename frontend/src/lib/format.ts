@@ -33,3 +33,7 @@ export function toClipboardText(value: unknown) {
   if (typeof value === "string") return value;
   return JSON.stringify(value, null, 2);
 }
+
+export function formatNumber(value: number) {
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+}

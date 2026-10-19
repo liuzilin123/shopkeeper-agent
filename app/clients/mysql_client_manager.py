@@ -53,10 +53,11 @@ class MySQLClientManager:
         await self.engine.dispose()
 
 
-# 一套连元数据库，一套连数仓模拟库
-# 后续由不同 repository 按职责分别使用
+# 一套连元数据库，一套连数仓模拟库，再加一套只读数仓连接
+# 只读连接只授予 SELECT，专门用来执行 LLM 生成的不可信 SQL，防止误写数仓
 meta_mysql_client_manager = MySQLClientManager(app_config.db_meta)
 dw_mysql_client_manager = MySQLClientManager(app_config.db_dw)
+dw_mysql_readonly_client_manager = MySQLClientManager(app_config.db_dw_readonly)
 
 if __name__ == "__main__":
     dw_mysql_client_manager.init()
