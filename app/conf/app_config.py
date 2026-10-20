@@ -88,6 +88,14 @@ class LLMConfig:
 
 
 @dataclass
+class RetrievalConfig:
+    """多路召回配置"""
+
+    # 按 RRF 融合分截断后送入 Reranker 的候选上限，用于控制重排成本
+    recall_top_k: int
+
+
+@dataclass
 class AppConfig:
     """项目级总配置入口"""
 
@@ -99,6 +107,7 @@ class AppConfig:
     embedding: EmbeddingConfig
     es: ESConfig
     llm: LLMConfig
+    retrieval: RetrievalConfig
 
 
 # 从当前文件位置回到项目根目录，再定位到 conf/app_config.yaml

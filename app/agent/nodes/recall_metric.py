@@ -15,6 +15,7 @@ from app.agent.llm import llm
 from app.agent.reranker import render_metric_candidate
 from app.agent.retrieval.rrf import reciprocal_rank_fusion
 from app.agent.state import DataAgentState
+from app.conf.app_config import app_config
 from app.core.log import logger
 from app.entities.metric_info import MetricInfo
 from app.prompt.prompt_loader import load_prompt
@@ -67,8 +68,18 @@ async def recall_metric(state: DataAgentState, runtime: Runtime[DataAgentContext
                 if score > candidate_scores.get(metric_id, 0.0):
                     candidate_scores[metric_id] = score
 
+        # 按 RRF 融合分从高到低排序；分数相同时用 id 兜底，避免依赖 set 遍历顺序
+        ranked_candidates: list[MetricInfo] = sorted(
+            candidate_map.values(),
+            key=lambda metric_info: (
+                -candidate_scores.get(metric_info.id, 0.0),
+                metric_info.id,
+            ),
+        )
+        # 只把 RRF 排名靠前的候选交给 Reranker，既让融合分参与最终排序，也控制重排成本
+        candidates = ranked_candidates[: app_config.retrieval.recall_top_k]
+
         # 候选统一交给 Reranker 做精排，让最相关的指标排到最前面
-        candidates: list[MetricInfo] = list(candidate_map.values())
         if candidates:
             items = [
                 (metric_info.id, render_metric_candidate(metric_info))
@@ -84,6 +95,10 @@ async def recall_metric(state: DataAgentState, runtime: Runtime[DataAgentContext
         else:
             retrieved_metric_infos = []
 
+        logger.info(
+            f"指标召回候选 {len(ranked_candidates)} 个，"
+            f"RRF 截断后 {len(candidates)} 个进入重排"
+        )
         logger.info(f"检索到指标信息：{[m.id for m in retrieved_metric_infos]}")
         writer({"type": "progress", "step": step, "status": "success"})
         return {"retrieved_metric_infos": retrieved_metric_infos}

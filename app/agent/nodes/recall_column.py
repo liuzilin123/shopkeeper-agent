@@ -15,6 +15,7 @@ from app.agent.llm import llm
 from app.agent.reranker import render_column_candidate
 from app.agent.retrieval.rrf import reciprocal_rank_fusion
 from app.agent.state import DataAgentState
+from app.conf.app_config import app_config
 from app.core.log import logger
 from app.entities.column_info import ColumnInfo
 from app.prompt.prompt_loader import load_prompt
@@ -69,8 +70,18 @@ async def recall_column(state: DataAgentState, runtime: Runtime[DataAgentContext
                 if score > candidate_scores.get(column_id, 0.0):
                     candidate_scores[column_id] = score
 
+        # 按 RRF 融合分从高到低排序；分数相同时用 id 兜底，避免依赖 set 遍历顺序
+        ranked_candidates: list[ColumnInfo] = sorted(
+            candidate_map.values(),
+            key=lambda column_info: (
+                -candidate_scores.get(column_info.id, 0.0),
+                column_info.id,
+            ),
+        )
+        # 只把 RRF 排名靠前的候选交给 Reranker，既让融合分参与最终排序，也控制重排成本
+        candidates = ranked_candidates[: app_config.retrieval.recall_top_k]
+
         # 候选统一交给 Reranker 做精排，让最相关的字段排到最前面
-        candidates: list[ColumnInfo] = list(candidate_map.values())
         if candidates:
             items = [
                 (column_info.id, render_column_candidate(column_info))
@@ -86,6 +97,10 @@ async def recall_column(state: DataAgentState, runtime: Runtime[DataAgentContext
         else:
             retrieved_column_infos = []
 
+        logger.info(
+            f"字段召回候选 {len(ranked_candidates)} 个，"
+            f"RRF 截断后 {len(candidates)} 个进入重排"
+        )
         writer({"type": "progress", "step": step, "status": "success"})
         return {"retrieved_column_infos": retrieved_column_infos}
     except Exception as e:

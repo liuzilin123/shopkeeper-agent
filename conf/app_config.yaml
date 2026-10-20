@@ -45,6 +45,10 @@ es:
   port: 9200
   index_name: data_agent
 
+retrieval:
+  # 按 RRF 融合分截断后送入 Reranker 的候选上限
+  recall_top_k: 20
+
 llm:
   model_name: deepseek-v4-flash
   api_key: ${oc.env:LLM_API_KEY}
